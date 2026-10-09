@@ -1,0 +1,61 @@
+name: Encrypt feed
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # every 3 hours (UTC)
+  workflow_dispatch:          # adds a manual "Run workflow" button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: encrypt-feed
+  cancel-in-progress: false
+
+jobs:
+  encrypt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cryptography
+        run: pip install cryptography
+
+      - name: Download plaintext feed (not committed)
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/AllProject789/Live_Stream_Place/main/streams.json?t=$(date +%s)" \
+            -o "$RUNNER_TEMP/streams.json"
+
+      - name: Skip if unchanged
+        id: check
+        run: |
+          NEW=$(sha256sum "$RUNNER_TEMP/streams.json" | cut -d' ' -f1)
+          OLD=$(cat feed.sha256 2>/dev/null || true)
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Feed unchanged - nothing to do"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "$NEW" > feed.sha256
+          fi
+
+      - name: Encrypt
+        if: steps.check.outputs.changed == 'true'
+        env:
+          FEED_KEY_ID: ${{ secrets.FEED_KEY_ID }}
+          FEED_AES_KEY: ${{ secrets.FEED_AES_KEY }}
+          FEED_SIGNING_KEY: ${{ secrets.FEED_SIGNING_KEY }}
+        run: python scripts/encrypt_feed.py "$RUNNER_TEMP/streams.json" feed.bin
+
+      - name: Commit feed.bin
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898237+github-actions[bot]@users.noreply.github.com"
+          git add feed.bin feed.sha256
+          git commit -m "Update feed"
+          git push
